@@ -51,10 +51,11 @@ pub(crate) mod receive {
 
 pub(crate) mod send {
     use super::*;
+    use crate::prelude::server::AuthorityCommandExt;
     use crate::prelude::{
         is_host_server, ClientId, ComponentRegistry, DisabledComponent, NetworkRelevanceMode,
-        OverrideTargetComponent, ReplicateHierarchy, Replicated, ReplicationGroup,
-        ShouldBePredicted, TargetEntity, Tick, TickManager, TimeManager,
+        OverrideTargetComponent, ReplicateHierarchy, ReplicationGroup, ShouldBePredicted,
+        TargetEntity, Tick, TickManager, TimeManager,
     };
     use crate::protocol::component::ComponentKind;
     use crate::server::error::ServerError;
@@ -65,7 +66,7 @@ pub(crate) mod send {
     };
     use crate::shared::replication::authority::{AuthorityPeer, HasAuthority};
     use crate::shared::replication::components::{
-        Cached, Controlled, Replicating, ReplicationGroupId, ReplicationTarget,
+        Cached, Controlled, InitialReplicated, Replicating, ReplicationGroupId, ReplicationTarget,
         ShouldBeInterpolated,
     };
     use crate::shared::replication::network_target::NetworkTarget;
@@ -154,6 +155,7 @@ pub(crate) mod send {
 
     /// Component that indicates which clients should predict and interpolate the entity
     #[derive(Component, Default, Clone, Debug, PartialEq, Reflect)]
+    #[reflect(Component)]
     pub struct SyncTarget {
         /// Which clients should predict this entity (unused for client to server replication)
         pub prediction: NetworkTarget,
@@ -358,19 +360,26 @@ pub(crate) mod send {
         // added that we check if the server has authority. After that, we should
         // rely only on commands.transfer_authority
         trigger: Trigger<OnAdd, AuthorityPeer>,
+        q: Query<&AuthorityPeer>,
         mut commands: Commands,
     ) {
-        commands
-            .entity(trigger.entity())
-            .add(|mut entity_mut: EntityWorldMut| {
-                if entity_mut
-                    .get::<AuthorityPeer>()
-                    .is_some_and(|authority| *authority == AuthorityPeer::Server)
-                {
-                    debug!("Adding HasAuthority to {:?}", entity_mut.id());
-                    entity_mut.insert(HasAuthority);
+        let entity = trigger.entity();
+        if let Ok(authority_peer) = q.get(entity) {
+            match authority_peer {
+                AuthorityPeer::Client(c) => {
+                    // immediately transfer authority to the client to make
+                    // sure they know that they own it
+                    commands
+                        .entity(entity)
+                        .transfer_authority(authority_peer.clone());
                 }
-            });
+                AuthorityPeer::Server => {
+                    debug!("Adding HasAuthority to {:?}", entity);
+                    commands.entity(entity).insert(HasAuthority);
+                }
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn replicate(
@@ -422,7 +431,7 @@ pub(crate) mod send {
                 let target_entity = entity_ref.get::<TargetEntity>();
                 let controlled_by = entity_ref.get::<ControlledBy>();
                 let authority_peer = entity_ref.get::<AuthorityPeer>();
-                let replicated = entity_ref.get::<Replicated>();
+                let initial_replicated = entity_ref.get::<InitialReplicated>();
                 // SAFETY: we know that the entity has the ReplicationTarget component
                 // because the archetype is in replicated_archetypes
                 let replication_target =
@@ -463,7 +472,7 @@ pub(crate) mod send {
                     entity.id(),
                     &replication_target,
                     cached_replication_target,
-                    replicated,
+                    initial_replicated,
                     group_id,
                     priority,
                     controlled_by,
@@ -536,7 +545,7 @@ pub(crate) mod send {
         entity: Entity,
         replication_target: &Ref<ReplicationTarget>,
         cached_replication_target: Option<&Cached<ReplicationTarget>>,
-        replicated: Option<&Replicated>,
+        initial_replicated: Option<&InitialReplicated>,
         group_id: ReplicationGroupId,
         priority: f32,
         controlled_by: Option<&ControlledBy>,
@@ -617,7 +626,7 @@ pub(crate) mod send {
             target.exclude(&NetworkTarget::Single(*c));
         }
         // we don't send entity-spawn to the client who originally spawned the entity
-        if let Some(client_id) = replicated.and_then(|r| r.from) {
+        if let Some(client_id) = initial_replicated.and_then(|r| r.from) {
             target.exclude(&NetworkTarget::Single(client_id));
         };
         if target.is_empty() {
@@ -3092,7 +3101,7 @@ pub(crate) mod send {
 
 pub(crate) mod commands {
     use crate::channel::builder::AuthorityChannel;
-    use crate::prelude::{Replicating, ServerConnectionManager};
+    use crate::prelude::{Replicated, Replicating, ServerConnectionManager};
     use crate::shared::replication::authority::{AuthorityChange, AuthorityPeer, HasAuthority};
     use bevy::ecs::system::EntityCommands;
     use bevy::prelude::{Entity, World};
@@ -3126,7 +3135,9 @@ pub(crate) mod commands {
                             .insert((HasAuthority, AuthorityPeer::Server));
                     }
                     (AuthorityPeer::None, AuthorityPeer::Client(c)) => {
-                        world.entity_mut(entity).insert(AuthorityPeer::Client(c));
+                        world
+                            .entity_mut(entity)
+                            .insert((AuthorityPeer::Client(c), Replicated { from: Some(c) }));
                         world
                             .resource_mut::<ServerConnectionManager>()
                             .send_message::<AuthorityChannel, _>(
@@ -3141,11 +3152,14 @@ pub(crate) mod commands {
                     (AuthorityPeer::Server, AuthorityPeer::None) => {
                         world
                             .entity_mut(entity)
-                            .remove::<HasAuthority>()
+                            .remove::<(HasAuthority, Replicated)>()
                             .insert(AuthorityPeer::None);
                     }
                     (AuthorityPeer::Client(c), AuthorityPeer::None) => {
-                        world.entity_mut(entity).insert(AuthorityPeer::None);
+                        world
+                            .entity_mut(entity)
+                            .remove::<Replicated>()
+                            .insert(AuthorityPeer::None);
                         world
                             .resource_mut::<ServerConnectionManager>()
                             .send_message::<AuthorityChannel, _>(
@@ -3162,6 +3176,7 @@ pub(crate) mod commands {
                         //  that the client has received the message?
                         world
                             .entity_mut(entity)
+                            .remove::<Replicated>()
                             .insert((HasAuthority, AuthorityPeer::Server));
                         world
                             .resource_mut::<ServerConnectionManager>()
@@ -3178,7 +3193,7 @@ pub(crate) mod commands {
                         world
                             .entity_mut(entity)
                             .remove::<HasAuthority>()
-                            .insert(AuthorityPeer::Client(c));
+                            .insert((AuthorityPeer::Client(c), Replicated { from: Some(c) }));
                         world
                             .resource_mut::<ServerConnectionManager>()
                             .send_message::<AuthorityChannel, _>(
@@ -3191,7 +3206,9 @@ pub(crate) mod commands {
                             .expect("could not send message");
                     }
                     (AuthorityPeer::Client(c1), AuthorityPeer::Client(c2)) => {
-                        world.entity_mut(entity).insert(AuthorityPeer::Client(c2));
+                        world
+                            .entity_mut(entity)
+                            .insert((AuthorityPeer::Client(c2), Replicated { from: Some(c2) }));
                         world
                             .resource_mut::<ServerConnectionManager>()
                             .send_message::<AuthorityChannel, _>(

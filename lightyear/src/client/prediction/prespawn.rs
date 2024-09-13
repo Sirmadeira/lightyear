@@ -328,6 +328,7 @@ impl PreSpawnedPlayerObjectPlugin {
 /// let custom_hash: u64 = compute_hash();
 /// PreSpawnedPlayerObject::new(hash);
 /// ``````
+#[reflect(Component)]
 pub struct PreSpawnedPlayerObject {
     /// The hash that will identify the spawned entity
     /// By default, if the hash is not set, it will be generated from the entity's archetype (list of components) and spawn tick
@@ -449,7 +450,7 @@ impl PreSpawnedPlayerObject {
 mod tests {
     use crate::client::prediction::predicted_history::{ComponentState, PredictionHistory};
     use crate::client::prediction::resource::PredictionManager;
-    use bevy::prelude::{default, Entity, Resource, With};
+    use bevy::prelude::{default, Entity, With};
 
     use crate::prelude::client::Confirmed;
     use crate::prelude::server::{Replicate, SyncTarget};
