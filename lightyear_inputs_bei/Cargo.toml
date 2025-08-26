@@ -1,6 +1,6 @@
 [package]
 name = "lightyear_inputs_bei"
-version = "0.22.5"
+version = "0.23.0"
 authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,6 +18,9 @@ server = ["lightyear_inputs/server", "lightyear_connection"]
 lightyear_core.workspace = true
 lightyear_inputs.workspace = true
 lightyear_utils.workspace = true
+lightyear_prediction.workspace = true
+lightyear_replication.workspace = true
+lightyear_serde.workspace = true
 lightyear_connection = { workspace = true, optional = true }
 
 # inputs
